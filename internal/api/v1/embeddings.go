@@ -99,25 +99,64 @@ func updateEmbeddings() error {
 	}
 	defer pool.Close()
 
-	rows, err := pool.Query(ctx, `SELECT id, name, description FROM products WHERE embedding IS NULL`)
+	// First, check if there are any products in the database
+	var productCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM products`).Scan(&productCount)
+	if err != nil {
+		return fmt.Errorf("failed to count products: %w", err)
+	}
+	
+	if productCount == 0 {
+		fmt.Println("No products found in database. Please upload products first.")
+		return fmt.Errorf("no products found in database")
+	}
+
+	// Check how many products need embeddings
+	var nullEmbeddingCount int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM products WHERE embedding IS NULL`).Scan(&nullEmbeddingCount)
+	if err != nil {
+		return fmt.Errorf("failed to count products without embeddings: %w", err)
+	}
+
+	fmt.Printf("Found %d products in database, %d need embeddings\n", productCount, nullEmbeddingCount)
+
+	if nullEmbeddingCount == 0 {
+		fmt.Println("All products already have embeddings.")
+		return nil
+	}
+
+	rows, err := pool.Query(ctx, `SELECT id, name, category, description FROM products WHERE embedding IS NULL`)
 	if err != nil {
 		return fmt.Errorf("failed to query products: %w", err)
 	}
 	defer rows.Close()
 
+	successCount := 0
+	errorCount := 0
+
 	for rows.Next() {
 		var id int
-		var name, desc string
-		if err := rows.Scan(&id, &name, &desc); err != nil {
+		var name, category, desc string
+		if err := rows.Scan(&id, &name, &category, &desc); err != nil {
 			fmt.Printf("Error scanning row: %v\n", err)
+			errorCount++
 			continue
 		}
 
-		// Combine name and description for embedding
-		combinedText := fmt.Sprintf("%s. %s", name, desc)
+		// Combine name, category, and description for better embedding
+		var combinedText string
+		if category != "" {
+			combinedText = fmt.Sprintf("%s. Category: %s. %s", name, category, desc)
+		} else {
+			combinedText = fmt.Sprintf("%s. %s", name, desc)
+		}
+
+		fmt.Printf("Processing product %d: %s\n", id, name)
+
 		embedding, err := getEmbedding(combinedText, "")
 		if err != nil {
-			fmt.Printf("Embedding error for product %d: %v\n", id, err)
+			fmt.Printf("Embedding error for product %d (%s): %v\n", id, name, err)
+			errorCount++
 			continue
 		}
 
@@ -125,17 +164,20 @@ func updateEmbeddings() error {
 		
 		_, err = pool.Exec(ctx, `UPDATE products SET embedding = $1::vector WHERE id = $2`, vectorStr, id)
 		if err != nil {
-			fmt.Printf("DB update error for product %d: %v\n", id, err)
+			fmt.Printf("DB update error for product %d (%s): %v\n", id, name, err)
+			errorCount++
 			continue
 		}
 
-		fmt.Printf("Successfully updated embedding for product %d\n", id)
+		fmt.Printf("Successfully updated embedding for product %d: %s\n", id, name)
+		successCount++
 	}
 
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating over rows: %w", err)
 	}
 
+	fmt.Printf("Embedding update completed. Success: %d, Errors: %d\n", successCount, errorCount)
 	return nil
 }
 

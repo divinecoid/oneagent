@@ -42,25 +42,26 @@ func UploadProductExcel(c *gin.Context) {
             continue // skip header
         }
 
-        if len(row) < 3 {
+        if len(row) < 4 {
             continue
         }
 
-        price, err := strconv.ParseFloat(row[1], 64)
+        price, err := strconv.ParseFloat(row[2], 64)
         if err != nil {
             continue
         }
 
         product := model.Product{
             Name:        row[0],
+            Category:    row[1],
             Price:       price,
-            Description: row[2],
+            Description: row[3],
         }
 
         _, err = db.DB.Exec(context.Background(), `
-            INSERT INTO products (name, price, description)
-            VALUES ($1, $2, $3)
-        `, product.Name, product.Price, product.Description)
+            INSERT INTO products (name, category, price, description)
+            VALUES ($1, $2, $3, $4)
+        `, product.Name, product.Category, product.Price, product.Description)
 
         if err != nil {
             fmt.Printf("DB error on row %d: %v\n", i, err)

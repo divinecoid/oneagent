@@ -80,6 +80,50 @@ func (h *ConfigHandler) CreateConfiguration(c *gin.Context) {
 
 	userID := c.MustGet("user_id").(int64)
 
+	// Check if user already has a configuration
+	existingConfig, err := h.configService.GetConfigurationByUser(c.Request.Context(), userID)
+	if err == nil {
+		// User has existing configuration, update it instead
+		existingConfig.Name = req.Name
+		existingConfig.OpenAIAPIKey = req.OpenAIAPIKey
+		existingConfig.WhatsappToken = req.WhatsappToken
+		existingConfig.WhatsappNumber = req.WhatsappNumber
+		existingConfig.BasicPrompt = req.BasicPrompt
+		existingConfig.MaxChatReplyCount = req.MaxChatReplyCount
+		existingConfig.MaxChatReplyChars = req.MaxChatReplyChars
+		existingConfig.OpenAIAPIKeyExpires = req.OpenAIAPIKeyExpires
+		existingConfig.WhatsappTokenExpires = req.WhatsappTokenExpires
+		existingConfig.OpenAIModel = req.OpenAIModel
+		existingConfig.OpenAIEmbeddingModel = req.OpenAIEmbeddingModel
+		existingConfig.UpdatedBy = userID
+
+		err = h.configService.UpdateConfiguration(c.Request.Context(), existingConfig)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{
+				Success: false,
+				Message: "Failed to update configuration",
+				Errors: gin.H{"error": err.Error()},
+				Meta: MetaData{
+					RequestID: c.GetHeader("X-Request-ID"),
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+				},
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, APIResponse{
+			Success: true,
+			Message: "Configuration updated successfully",
+			Data:    existingConfig,
+			Meta: MetaData{
+				RequestID: c.GetHeader("X-Request-ID"),
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+			},
+		})
+		return
+	}
+
+	// User doesn't have existing configuration, create new one
 	config := &model.UserConfiguration{
 		UserID:                userID,
 		Name:                  req.Name,
@@ -97,7 +141,7 @@ func (h *ConfigHandler) CreateConfiguration(c *gin.Context) {
 		UpdatedBy:             userID,
 	}
 
-	err := h.configService.CreateConfiguration(c.Request.Context(), config)
+	err = h.configService.CreateConfiguration(c.Request.Context(), config)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, APIResponse{
 			Success: false,

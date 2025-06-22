@@ -289,7 +289,7 @@ func SearchProducts(c *gin.Context) {
     var results []SearchResult
     for rows.Next() {
         var result SearchResult
-        err := rows.Scan(&result.ID, &result.Name, &result.Price, &result.Description, &result.Similarity)
+        err := rows.Scan(&result.ID, &result.Name, &result.Category, &result.Price, &result.Description, &result.Similarity)
         if err != nil {
             c.JSON(http.StatusInternalServerError, APIResponse{
                 Success: false,
@@ -422,16 +422,27 @@ func ChatWithProducts(c *gin.Context) {
     }
     defer pool.Close()
 
-    // Get top 3 most similar products
+    // Enhanced RAG: Get more relevant products with better similarity threshold
     rows, err := pool.Query(ctx, `
-        SELECT id, name, price, description, 1 - (embedding <=> $1::vector) as similarity
+        SELECT id, name, category, price, description, 1 - (embedding <=> $1::vector) as similarity
         FROM products
         WHERE embedding IS NOT NULL
+        AND 1 - (embedding <=> $1::vector) > 0.3
         ORDER BY embedding <=> $1::vector
-        LIMIT 3
+        LIMIT 5
     `, vectorStr)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Search query failed: %v", err)})
+        c.JSON(http.StatusInternalServerError, APIResponse{
+            Success: false,
+            Message: "Search query failed",
+            Errors: gin.H{
+                "database_error": fmt.Sprintf("Search query failed: %v", err),
+            },
+            Meta: MetaData{
+                RequestID: c.GetHeader("X-Request-ID"),
+                Timestamp: time.Now().UTC().Format(time.RFC3339),
+            },
+        })
         return
     }
     defer rows.Close()
@@ -439,19 +450,46 @@ func ChatWithProducts(c *gin.Context) {
     var results []SearchResult
     for rows.Next() {
         var result SearchResult
-        err := rows.Scan(&result.ID, &result.Name, &result.Price, &result.Description, &result.Similarity)
+        err := rows.Scan(&result.ID, &result.Name, &result.Category, &result.Price, &result.Description, &result.Similarity)
         if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error scanning results: %v", err)})
+            c.JSON(http.StatusInternalServerError, APIResponse{
+                Success: false,
+                Message: "Error processing search results",
+                Errors: gin.H{
+                    "database_error": fmt.Sprintf("Error scanning results: %v", err),
+                },
+                Meta: MetaData{
+                    RequestID: c.GetHeader("X-Request-ID"),
+                    Timestamp: time.Now().UTC().Format(time.RFC3339),
+                },
+            })
             return
         }
         results = append(results, result)
     }
 
-    // Generate context for OpenAI
-    context := fmt.Sprintf("Question: %s\n\nAvailable products:\n%s", 
-        req.Question, 
-        formatProductList(results),
-    )
+    // If no relevant products found, try a broader search
+    if len(results) == 0 {
+        rows, err := pool.Query(ctx, `
+            SELECT id, name, category, price, description, 1 - (embedding <=> $1::vector) as similarity
+            FROM products
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> $1::vector
+            LIMIT 3
+        `, vectorStr)
+        if err == nil {
+            defer rows.Close()
+            for rows.Next() {
+                var result SearchResult
+                if err := rows.Scan(&result.ID, &result.Name, &result.Category, &result.Price, &result.Description, &result.Similarity); err == nil {
+                    results = append(results, result)
+                }
+            }
+        }
+    }
+
+    // Generate enhanced context for OpenAI with better formatting
+    context := generateEnhancedContext(req.Question, results)
 
     // Call OpenAI API for response generation
     answer, err := generateOpenAIResponse(context, config)
@@ -474,13 +512,57 @@ func ChatWithProducts(c *gin.Context) {
     c.JSON(http.StatusOK, APIResponse{
         Success: true,
         Message: "Chat response generated successfully",
-        Data:    gin.H{"answer": answer},
-        Errors:  nil,
+        Data: gin.H{
+            "answer": answer,
+            "relevant_products": results,
+            "products_count": len(results),
+        },
+        Errors: nil,
         Meta: MetaData{
             RequestID: c.GetHeader("X-Request-ID"),
             Timestamp: time.Now().UTC().Format(time.RFC3339),
         },
     })
+}
+
+func generateEnhancedContext(question string, products []SearchResult) string {
+    if len(products) == 0 {
+        return fmt.Sprintf(`Question: %s
+
+Note: No specific products found in our database that match your query. I'll provide general assistance based on your question.`, question)
+    }
+
+    var context strings.Builder
+    context.WriteString(fmt.Sprintf("Question: %s\n\n", question))
+    context.WriteString("Relevant products from our database:\n")
+    context.WriteString(strings.Repeat("=", 50) + "\n")
+    
+    for i, p := range products {
+        context.WriteString(fmt.Sprintf(
+            "Product %d:\n"+
+            "- Name: %s\n"+
+            "- Category: %s\n"+
+            "- Price: Rp %.2f\n"+
+            "- Description: %s\n"+
+            "- Relevance Score: %.2f\n",
+            i+1,
+            p.Name,
+            p.Category,
+            p.Price,
+            p.Description,
+            p.Similarity,
+        ))
+        if i < len(products)-1 {
+            context.WriteString("\n")
+        }
+    }
+    
+    context.WriteString("\n" + strings.Repeat("=", 50) + "\n")
+    context.WriteString("Instructions: Based on the user's question and the relevant products above, provide a helpful and accurate response. ")
+    context.WriteString("If the products don't match the user's needs, suggest alternatives or ask for clarification. ")
+    context.WriteString("Always mention specific product names when making recommendations.")
+    
+    return context.String()
 }
 
 func generateOpenAIResponse(context string, config *model.UserConfiguration) (string, error) {
@@ -490,9 +572,19 @@ func generateOpenAIResponse(context string, config *model.UserConfiguration) (st
 
     systemPrompt := config.BasicPrompt
     if systemPrompt == "" {
-        systemPrompt = `You are a helpful shopping assistant that provides recommendations based on product information. 
-Please respond in Indonesian language. Keep responses concise and natural.
-Focus on the relevant product features and benefits that match the user's query.`
+        systemPrompt = `You are an expert shopping assistant with access to a comprehensive product database. Your role is to:
+
+1. Analyze the user's question carefully
+2. Review the provided product information thoroughly
+3. Provide accurate, helpful recommendations based on the available products
+4. Respond in Indonesian language with a natural, conversational tone
+5. Be specific about product names, prices, and features when making recommendations
+6. If no products match the user's needs, politely explain and suggest alternatives
+7. Always prioritize accuracy and relevance over generic responses
+8. Include pricing information when relevant
+9. Highlight unique features or benefits of recommended products
+
+Remember: You can only recommend products that are actually available in the database. If you're unsure about something, ask for clarification rather than making assumptions.`
     }
 
     payload := OpenAIRequest{
@@ -516,7 +608,6 @@ Focus on the relevant product features and benefits that match the user's query.
 
     req.Header.Set("Content-Type", "application/json")
     req.Header.Set("Authorization", "Bearer "+config.OpenAIAPIKey)
-    fmt.Println("OpenAI API Key:", config.OpenAIAPIKey)
 
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
