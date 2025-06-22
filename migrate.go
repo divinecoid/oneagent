@@ -11,8 +11,8 @@ import (
 )
 
 func main() {
-	// Read migration file - now using the fix migration for products vector
-	migrationPath := filepath.Join("internal", "db", "migrations_fix_products_vector.sql")
+	// Read migration file for adding seller_id to products
+	migrationPath := filepath.Join("internal", "db", "migrations_products_add_seller.sql")
 	migrationsBytes, err := os.ReadFile(migrationPath)
 	if err != nil {
 		fmt.Printf("Failed to read migrations file: %v\n", err)
@@ -48,7 +48,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Successfully ran fix products vector migration")
+	fmt.Println("Successfully ran add seller_id to products migration")
 }
 
 // splitSQLStatementsDollar splits SQL by semicolons, but keeps everything between $$ and $$; as a single statement

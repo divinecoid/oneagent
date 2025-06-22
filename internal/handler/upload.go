@@ -12,6 +12,34 @@ import (
 )
 
 func UploadProductExcel(c *gin.Context) {
+    // Parse seller_id from multipart form
+    sellerIDStr := c.PostForm("seller_id")
+    if sellerIDStr == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "seller_id is required as a form field"})
+        return
+    }
+    sellerID, err := strconv.ParseInt(sellerIDStr, 10, 64)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "seller_id must be a valid integer"})
+        return
+    }
+
+    // Validate seller_id exists in users table with role 'seller'
+    var exists bool
+    err = db.DB.QueryRow(
+        context.Background(),
+        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND role = 'seller')",
+        sellerID,
+    ).Scan(&exists)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate seller_id", "details": err.Error()})
+        return
+    }
+    if !exists {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "seller_id does not exist in users table with role 'seller'"})
+        return
+    }
+
     file, err := c.FormFile("file")
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "File is required"})
@@ -59,9 +87,9 @@ func UploadProductExcel(c *gin.Context) {
         }
 
         _, err = db.DB.Exec(context.Background(), `
-            INSERT INTO products (name, category, price, description)
-            VALUES ($1, $2, $3, $4)
-        `, product.Name, product.Category, product.Price, product.Description)
+            INSERT INTO products (name, category, price, description, seller_id)
+            VALUES ($1, $2, $3, $4, $5)
+        `, product.Name, product.Category, product.Price, product.Description, sellerID)
 
         if err != nil {
             fmt.Printf("DB error on row %d: %v\n", i, err)

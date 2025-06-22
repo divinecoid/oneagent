@@ -36,16 +36,77 @@ func GetUsers(c *gin.Context) {
 }
 
 func UploadProductExcel(c *gin.Context) {
+    // Parse seller_id from multipart form
+    sellerIDStr := c.PostForm("seller_id")
+    if sellerIDStr == "" {
+        c.JSON(http.StatusBadRequest, APIResponse{
+            Success: false,
+            Message: "seller_id is required as a form field",
+            Data:    nil,
+            Errors:  gin.H{"upload_error": "seller_id is required as a form field"},
+            Meta: MetaData{
+                RequestID: c.GetHeader("X-Request-ID"),
+                Timestamp: time.Now().UTC().Format(time.RFC3339),
+            },
+        })
+        return
+    }
+    sellerID, err := strconv.ParseInt(sellerIDStr, 10, 64)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, APIResponse{
+            Success: false,
+            Message: "seller_id must be a valid integer",
+            Data:    nil,
+            Errors:  gin.H{"upload_error": "seller_id must be a valid integer"},
+            Meta: MetaData{
+                RequestID: c.GetHeader("X-Request-ID"),
+                Timestamp: time.Now().UTC().Format(time.RFC3339),
+            },
+        })
+        return
+    }
+
+    // Validate seller_id exists in users table with role 'seller'
+    var exists bool
+    err = db.DB.QueryRow(
+        context.Background(),
+        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND role = 'seller')",
+        sellerID,
+    ).Scan(&exists)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, APIResponse{
+            Success: false,
+            Message: "Failed to validate seller_id",
+            Data:    nil,
+            Errors:  gin.H{"upload_error": "Failed to validate seller_id", "details": err.Error()},
+            Meta: MetaData{
+                RequestID: c.GetHeader("X-Request-ID"),
+                Timestamp: time.Now().UTC().Format(time.RFC3339),
+            },
+        })
+        return
+    }
+    if !exists {
+        c.JSON(http.StatusBadRequest, APIResponse{
+            Success: false,
+            Message: "seller_id does not exist in users table with role 'seller'",
+            Data:    nil,
+            Errors:  gin.H{"upload_error": "seller_id does not exist in users table with role 'seller'"},
+            Meta: MetaData{
+                RequestID: c.GetHeader("X-Request-ID"),
+                Timestamp: time.Now().UTC().Format(time.RFC3339),
+            },
+        })
+        return
+    }
+
     file, err := c.FormFile("file")
     if err != nil {
         c.JSON(http.StatusBadRequest, APIResponse{
             Success: false,
-            Message: "File upload failed",
+            Message: "File is required",
             Data:    nil,
-            Errors: gin.H{
-                "upload_error": "Failed to process uploaded file",
-                "details":     err.Error(),
-            },
+            Errors:  gin.H{"upload_error": "File is required"},
             Meta: MetaData{
                 RequestID: c.GetHeader("X-Request-ID"),
                 Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -60,10 +121,7 @@ func UploadProductExcel(c *gin.Context) {
             Success: false,
             Message: "Failed to open file",
             Data:    nil,
-            Errors: gin.H{
-                "file_error": "Failed to open uploaded file",
-                "details":    err.Error(),
-            },
+            Errors:  gin.H{"file_error": "Failed to open uploaded file", "details": err.Error()},
             Meta: MetaData{
                 RequestID: c.GetHeader("X-Request-ID"),
                 Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -79,10 +137,7 @@ func UploadProductExcel(c *gin.Context) {
             Success: false,
             Message: "Invalid Excel file",
             Data:    nil,
-            Errors: gin.H{
-                "file_error": "Failed to parse Excel file",
-                "details":   err.Error(),
-            },
+            Errors:  gin.H{"file_error": "Invalid Excel file", "details": err.Error()},
             Meta: MetaData{
                 RequestID: c.GetHeader("X-Request-ID"),
                 Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -97,10 +152,7 @@ func UploadProductExcel(c *gin.Context) {
             Success: false,
             Message: "Failed to read sheet",
             Data:    nil,
-            Errors: gin.H{
-                "sheet_error": "Failed to read Excel sheet",
-                "details":     err.Error(),
-            },
+            Errors:  gin.H{"sheet_error": "Failed to read Excel sheet", "details": err.Error()},
             Meta: MetaData{
                 RequestID: c.GetHeader("X-Request-ID"),
                 Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -109,22 +161,17 @@ func UploadProductExcel(c *gin.Context) {
         return
     }
 
-    fmt.Println("Excel Data:")
-    fmt.Println("Row 0 (Headers):", strings.Join(rows[0], ", "))
-    
     for i, row := range rows {
         if i == 0 {
             continue // skip header
         }
 
         if len(row) < 4 {
-            fmt.Printf("Row %d: Skipped (insufficient columns, got %d columns)\n", i, len(row))
             continue
         }
 
         price, err := strconv.ParseFloat(row[2], 64)
         if err != nil {
-            fmt.Printf("Row %d: Skipped (invalid price format: %s)\n", i, row[2])
             continue
         }
 
@@ -135,18 +182,13 @@ func UploadProductExcel(c *gin.Context) {
             Description: row[3],
         }
 
-        fmt.Printf("Row %d: Name=%s, Category=%s, Price=%.2f, Description=%s\n",
-            i, product.Name, product.Category, product.Price, product.Description)
-
         _, err = db.DB.Exec(context.Background(), `
-            INSERT INTO products (name, category, price, description)
-            VALUES ($1, $2, $3, $4)
-        `, product.Name, product.Category, product.Price, product.Description)
+            INSERT INTO products (name, category, price, description, seller_id)
+            VALUES ($1, $2, $3, $4, $5)
+        `, product.Name, product.Category, product.Price, product.Description, sellerID)
 
         if err != nil {
             fmt.Printf("DB error on row %d: %v\n", i, err)
-        } else {
-            fmt.Printf("Row %d: Successfully inserted into database\n", i)
         }
     }
 
@@ -422,15 +464,16 @@ func ChatWithProducts(c *gin.Context) {
     }
     defer pool.Close()
 
-    // Enhanced RAG: Get more relevant products with better similarity threshold
+    // Enhanced RAG: Get more relevant products with better similarity threshold, only for this seller
     rows, err := pool.Query(ctx, `
         SELECT id, name, category, price, description, 1 - (embedding <=> $1::vector) as similarity
         FROM products
         WHERE embedding IS NOT NULL
+        AND seller_id = $2
         AND 1 - (embedding <=> $1::vector) > 0.3
         ORDER BY embedding <=> $1::vector
         LIMIT 5
-    `, vectorStr)
+    `, vectorStr, userID)
     if err != nil {
         c.JSON(http.StatusInternalServerError, APIResponse{
             Success: false,
@@ -468,15 +511,16 @@ func ChatWithProducts(c *gin.Context) {
         results = append(results, result)
     }
 
-    // If no relevant products found, try a broader search
+    // If no relevant products found, try a broader search (still only for this seller)
     if len(results) == 0 {
         rows, err := pool.Query(ctx, `
             SELECT id, name, category, price, description, 1 - (embedding <=> $1::vector) as similarity
             FROM products
             WHERE embedding IS NOT NULL
+            AND seller_id = $2
             ORDER BY embedding <=> $1::vector
             LIMIT 3
-        `, vectorStr)
+        `, vectorStr, userID)
         if err == nil {
             defer rows.Close()
             for rows.Next() {
