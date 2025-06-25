@@ -11,8 +11,13 @@ import (
 )
 
 func main() {
-	// Read migration file for adding seller_id to products
-	migrationPath := filepath.Join("internal", "db", "migrations_products_add_seller.sql")
+	// Accept migration filename as argument, default to migrations_carts.sql
+	migrationFile := "migrations_carts.sql"
+	if len(os.Args) > 1 {
+		migrationFile = os.Args[1]
+	}
+	fmt.Printf("Running migration: %s\n", migrationFile)
+	migrationPath := filepath.Join("internal", "db", migrationFile)
 	migrationsBytes, err := os.ReadFile(migrationPath)
 	if err != nil {
 		fmt.Printf("Failed to read migrations file: %v\n", err)
@@ -48,7 +53,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Successfully ran add seller_id to products migration")
+	fmt.Printf("Successfully ran migration: %s\n", migrationFile)
 }
 
 // splitSQLStatementsDollar splits SQL by semicolons, but keeps everything between $$ and $$; as a single statement
